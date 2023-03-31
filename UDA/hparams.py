@@ -13,7 +13,7 @@ class Hparams:
     backbone: str = "resnet50"
     total_steps: int = 1048576
     device: str = "cuda:0"
-    batch_size: int = 128
+    batch_size: int = 64
     lr: float = 0.03
     warmup: int = 0
     weight_decay: float = 0.0005
