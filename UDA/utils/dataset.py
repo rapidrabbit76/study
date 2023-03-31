@@ -1,7 +1,8 @@
 from datasets import load_dataset
 from torchvision import transforms
 import copy
-from dataset.randaugment import RandAugment
+from utils.randaugment import RandAugment
+import random
 
 
 class LabeledTRansform:
@@ -24,6 +25,24 @@ class UDATransform:
         row["x_w"] = [self.weak(image) for image in images]
         row["x_s"] = [self.strong(image) for image in images]
         return row
+
+
+class InfiniteSampler:
+    def __init__(self, dataset, shuffle=False):
+        assert len(dataset) > 0
+        self.dataset_len = len(dataset)
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        order = list(range((self.dataset_len)))
+        idx = 0
+        while True:
+            yield order[idx]
+            idx += 1
+            if idx == len(order):
+                if self.shuffle:
+                    random.shuffle(order)
+                idx = 0
 
 
 def build_dataset(datatype="cifar10"):
