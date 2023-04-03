@@ -1,3 +1,4 @@
+from random import Random
 import torch
 import torch.nn.functional as F
 
@@ -13,6 +14,7 @@ from argparse_dataclass import ArgumentParser
 from hparams import Hparams
 from dataset.cifar import DATASET_GETTERS
 import torchmetrics.functional as TF
+from torchmetrics import MeanMetric
 import numpy as np
 
 
@@ -26,16 +28,23 @@ def main():
     parser = ArgumentParser(Hparams)
     hp = parser.parse_args([])
     utils.seed_everything(hp.seed)
+
+    metric_loss = MeanMetric()
+    metric_loss_sv = MeanMetric()
+    metric_loss_usv = MeanMetric()
+    metric_mask = MeanMetric()
+
     labeled_ds, unlabeled_ds, test_ds = DATASET_GETTERS[hp.dataset](hp, "./data")
     print(
         f"""
         labeled_data: {len(labeled_ds)}
-        unlabeled_data: {len(unlabeled_ds)}""",
+        unlabeled_data: {len(unlabeled_ds)}
+        {hp}""",
     )
 
     labeled_dl = DataLoader(
         labeled_ds,
-        sampler=InfiniteSampler(labeled_ds, shuffle=True),
+        sampler=InfiniteSampler(labeled_ds),
         num_workers=hp.num_workers,
         batch_size=hp.batch_size,
         drop_last=True,
@@ -43,7 +52,7 @@ def main():
     )
     unlabeled_dl = DataLoader(
         unlabeled_ds,
-        sampler=InfiniteSampler(unlabeled_ds, shuffle=True),
+        sampler=InfiniteSampler(unlabeled_ds),
         num_workers=hp.num_workers,
         batch_size=hp.batch_size * hp.mu,
         drop_last=True,
@@ -57,9 +66,8 @@ def main():
     )
 
     model = timm.create_model(
-        "resnet50", num_classes=hp.num_classes, pretrained=False
+        hp.backbone, num_classes=hp.num_classes, pretrained=False
     ).to(hp.device)
-    utils.etc.init_weights(model)
 
     if hp.use_ema:
         ema_model = utils.ModelEMA(model, decay=hp.ema_decay)
@@ -83,6 +91,7 @@ def main():
             "weight_decay": 0.0,
         },
     ]
+
     optimizer = optim.SGD(params=params, lr=hp.lr, momentum=0.9, nesterov=hp.nesterov)
     scheduler = CosineScheduleWithWarmup(
         optimizer=optimizer,
@@ -101,7 +110,7 @@ def main():
         (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
 
         batch_size = inputs_x.shape[0]
-        inputs = torch.cat((inputs_x, inputs_u_w, inputs_u_s)).to(hp.device)
+        inputs = torch.cat((inputs_x, inputs_u_w, inputs_u_s))
         inputs = utils.etc.interleave(inputs, 2 * hp.mu + 1).to(hp.device)
         targets_x = targets_x.to(hp.device)
         logits = model(inputs)
@@ -110,15 +119,15 @@ def main():
         logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
         del logits
 
-        sv_loss = F.cross_entropy(logits_x, targets_x)
+        sv_loss = F.cross_entropy(logits_x, targets_x, reduction="mean")
 
         pseudo_label = torch.softmax(logits_u_w.detach() / hp.T, dim=-1)
-        max_probs, targets_pseudo_label = torch.max(pseudo_label, dim=-1)
+        max_probs, targets_u = torch.max(pseudo_label, dim=-1)
         mask = max_probs.ge(hp.threshold).float()
 
-        usv_loss = torch.mean(
-            F.cross_entropy(logits_u_s, targets_pseudo_label, reduction="none") * mask
-        )
+        usv_loss = (
+            F.cross_entropy(logits_u_s, targets_u, reduction="none") * mask
+        ).mean()
         loss = sv_loss + usv_loss * hp.lambda_u
 
         loss.backward()
@@ -130,14 +139,18 @@ def main():
             ema_model.update_parameters(model)
 
         model.zero_grad()
+        metric_loss.update(loss.item())
+        metric_loss_sv.update(sv_loss.item())
+        metric_loss_usv.update(usv_loss.item())
+        metric_mask.update(mask.mean().item())
 
-        if gs % 5 == 0:
-            tb.add_scalar("train/1.loss", loss.item(), global_step=gs)
-            tb.add_scalar("train/2.loss.sv", sv_loss.item(), global_step=gs)
-            tb.add_scalar("train/3.loss.usv", usv_loss.item(), global_step=gs)
-            tb.add_scalar("train/4.mask", mask.mean().item(), global_step=gs)
+        if gs % 50 == 0 or (gs + 1 == hp.total_steps):
+            tb.add_scalar("train/1.loss", metric_loss.compute(), global_step=gs)
+            tb.add_scalar("train/2.loss.sv", metric_loss_sv.compute(), global_step=gs)
+            tb.add_scalar("train/3.loss.usv", metric_loss_usv.compute(), global_step=gs)
+            tb.add_scalar("train/4.mask", metric_mask.compute(), global_step=gs)
 
-        if gs % 1000 == 0:
+        if gs % 1000 == 0 or (gs + 1 == hp.total_steps):
             # test
             test_model = ema_model if hp.use_ema else model
             test_model.eval()
@@ -147,21 +160,25 @@ def main():
             tb.add_scalar("validation/1.loss", info_dict["loss"], global_step=gs)
             tb.add_scalar("validation/2.acc", info_dict["acc"], global_step=gs)
             tb.add_scalar("validation/3.acc_t3", info_dict["acc_t3"], global_step=gs)
+            metric_loss.reset()
+            metric_loss_sv.reset()
+            metric_loss_usv.reset()
+            metric_mask.reset()
 
             ckpt = {
                 "gs": gs,
                 "state_dict": model.state_dict(),
-                "ema_state_dict": ema_model.state_dict(),
+                "ema_state_dict": ema_model.state_dict() if hp.use_ema else None,
                 "acc": info_dict["acc"],
             }
             checkpoint_manager.save_checkpoint(ckpt, info_dict["acc"])
 
         msg = (
             f"lr: {scheduler.get_last_lr()[0] :.4f} "
-            + f"loss: {loss.item(): .4f} "
-            + f"loss_sv: {sv_loss.item(): .4f} "
-            + f"uda_loss: {usv_loss.item(): .4f} "
-            + f"mask: {mask.mean().item():.2f} "
+            + f"loss: {metric_loss.compute(): .4f} "
+            + f"loss_sv: {metric_loss_sv.compute(): .4f} "
+            + f"loss_usv: {metric_loss_usv.compute(): .4f} "
+            + f"mask: {metric_mask.compute():.2f} "
             + f"test_loss: {info_dict['loss']: .4f} "
             + f"test_acc: {info_dict['acc']: .4f} "
             + f"test_acc_t3: {info_dict['acc_t3']: .4f}"

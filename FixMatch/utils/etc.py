@@ -7,6 +7,7 @@ import torch
 from copy import deepcopy
 
 import torch
+from torch import Tensor
 import torch.nn as nn
 
 
@@ -59,12 +60,12 @@ class ModelEMA(nn.Module):
         self.module.load_state_dict(state_dict)
 
 
-def interleave(x, size):
+def interleave(x: Tensor, size) -> Tensor:
     s = list(x.shape)
     return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
 
-def de_interleave(x, size):
+def de_interleave(x: Tensor, size) -> Tensor:
     s = list(x.shape)
     return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 

@@ -28,7 +28,7 @@ class UDATransform:
 
 
 class InfiniteSampler:
-    def __init__(self, dataset, shuffle=False):
+    def __init__(self, dataset, shuffle=True):
         assert len(dataset) > 0
         self.dataset_len = len(dataset)
         self.shuffle = shuffle
