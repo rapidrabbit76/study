@@ -3,16 +3,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Hparams:
-    gpu_id = 0
-    num_workers = 8
     dataset = "cifar10"
-    epochs: int = 100
     num_classes: int = 10
     num_labeled = 4000
     expand_labels = False
     backbone: str = "resnet50"
-    total_steps: int = 1048576
     device: str = "cuda:0"
+    num_workers = 8
+    total_steps: int = 1048576
     batch_size: int = 64
     lr: float = 0.03
     warmup: int = 0
@@ -25,4 +23,3 @@ class Hparams:
     T: float = 0.4
     threshold: float = 0.8
     seed: int = 42
-    amp = False
