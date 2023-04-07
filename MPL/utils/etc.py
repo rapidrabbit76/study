@@ -1,6 +1,7 @@
 import os
 import random
 import shutil
+from typing import Optional
 
 import numpy as np
 import torch
@@ -9,6 +10,7 @@ from copy import deepcopy
 import torch
 from torch import Tensor
 import torch.nn as nn
+from accelerate import Accelerator
 
 
 def seed_everything(seed: int = 42) -> int:
@@ -69,12 +71,22 @@ class BestMobelCheckPoint:
 
     def is_best(self, metric) -> bool:
         if not self.best_metric:
+            self.best_metric = metric
             return True
         return metric >= self.best_metric
+    
 
-    def save_checkpoint(self, ckpt, metric, filename="cpkt.pth.tar"):
+    def save_checkpoint(
+        self,
+        ckpt,
+        metric,
+        filename="cpkt.pth.tar",
+        accelerator: Optional[Accelerator] = None,
+    ):
         filepath = os.path.join(self.ckpt_dir, filename)
         torch.save(ckpt, filepath)
         if self.is_best(metric):
             shutil.copyfile(filepath, os.path.join(self.ckpt_dir, "best_model.pth.tar"))
 
+
+    

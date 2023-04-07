@@ -14,7 +14,7 @@ class Hparams:
     eval_step: int = 1000
     batch_size: int = 128
 
-    backbone: str = "wide_resnet101_2"
+    backbone: str = "resnet50"
     student_dropout: float = 0.2
     student_lr: float = 0.05
     student_momentum = 0.9
