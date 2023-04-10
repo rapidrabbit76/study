@@ -31,7 +31,9 @@ class ModelEMA(nn.Module):
         self.module = deepcopy(model)
         self.module.eval()
         self.decay = decay
-        self.device = device  # perform ema on different device from model if set
+        self.device = (
+            device  # perform ema on different device from model if set
+        )
         if self.device is not None:
             self.module.to(device=device)
 
@@ -40,7 +42,9 @@ class ModelEMA(nn.Module):
 
     def _update(self, model, update_fn):
         with torch.no_grad():
-            for ema_v, model_v in zip(self.module.parameters(), model.parameters()):
+            for ema_v, model_v in zip(
+                self.module.parameters(), model.parameters()
+            ):
                 if self.device is not None:
                     model_v = model_v.to(device=self.device)
                 ema_v.copy_(update_fn(ema_v, model_v))
@@ -74,7 +78,6 @@ class BestMobelCheckPoint:
             self.best_metric = metric
             return True
         return metric >= self.best_metric
-    
 
     def save_checkpoint(
         self,
@@ -86,7 +89,6 @@ class BestMobelCheckPoint:
         filepath = os.path.join(self.ckpt_dir, filename)
         torch.save(ckpt, filepath)
         if self.is_best(metric):
-            shutil.copyfile(filepath, os.path.join(self.ckpt_dir, "best_model.pth.tar"))
-
-
-    
+            shutil.copyfile(
+                filepath, os.path.join(self.ckpt_dir, "best_model.pth.tar")
+            )
