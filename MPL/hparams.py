@@ -14,7 +14,7 @@ class Hparams:
     eval_step: int = 1000
     batch_size: int = 128
 
-    backbone: str = "resnet50"
+    backbone: str = "WideResNet"
     student_dropout: float = 0.2
     student_lr: float = 0.05
     student_momentum = 0.9
@@ -37,7 +37,7 @@ class Hparams:
     label_smoothing: float = 0.15
     T: float = 0.7
     threshold: float = 0.6
-    seed: int = 5
+    seed: int = 2
     grad_clip: float = 1000000000.0
 
     finetune: bool = True

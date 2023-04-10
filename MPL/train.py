@@ -1,6 +1,4 @@
-from random import Random
 import shutil
-from time import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,9 +9,6 @@ from tqdm.auto import tqdm
 from utils.dataset import InfiniteSampler
 from utils.scheduler import CosineScheduleWithWarmup
 import utils
-import timm
-from torch.utils.tensorboard import SummaryWriter
-from argparse_dataclass import ArgumentParser
 from hparams import Hparams
 from dataset.cifar import DATASET_GETTERS
 import torchmetrics.functional as TF
@@ -23,6 +18,8 @@ import numpy as np
 from accelerate import Accelerator
 from datetime import datetime
 import os
+import models
+from accelerate.utils import DistributedDataParallelKwargs
 
 torch.backends.cudnn.benchmark = True
 
@@ -35,10 +32,17 @@ def main():
         hp.log_dir, f"{hp.dataset}.{hp.num_labeled}.{hp.backbone}"
     )
     os.makedirs(logging_dir, exist_ok=True)
-    accelerator = Accelerator(log_with="tensorboard", logging_dir=logging_dir)
+    kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(
+        log_with="tensorboard",
+        logging_dir=logging_dir,
+        kwargs_handlers=[kwargs],
+    )
 
     with accelerator.main_process_first():
-        labeled_ds, unlabeled_ds, test_ds, finetune_ds = DATASET_GETTERS[hp.dataset](hp)
+        labeled_ds, unlabeled_ds, test_ds, finetune_ds = DATASET_GETTERS[
+            hp.dataset
+        ](hp)
 
     accelerator.print(
         f"""
@@ -80,15 +84,13 @@ def main():
         batch_size=hp.batch_size,
     )
 
-    teacher_model = timm.create_model(
+    teacher_model = models.create_model(
         hp.backbone, num_classes=hp.num_classes, pretrained=False
     )
 
-    student_model = timm.create_model(
+    student_model = models.create_model(
         hp.backbone, num_classes=hp.num_classes, pretrained=False
     )
-    if hp.use_ema:
-        ema_student_model = utils.ModelEMA(student_model, decay=hp.ema_decay)
 
     no_decay = ["bias", "bn"]
     teacher_params = [
@@ -187,6 +189,9 @@ def main():
         finetune_dl,
     )
 
+    if hp.use_ema:
+        ema_student_model = utils.ModelEMA(student_model, decay=hp.ema_decay)
+
     teacher_model.train()
     student_model.train()
 
@@ -229,7 +234,9 @@ def main():
         mask = max_probs.ge(hp.threshold).float()
         # UDA loss (KLD)
         t_loss_u = torch.mean(
-            -(soft_pseudo_label * torch.log_softmax(t_logits_us, dim=-1)).sum(dim=-1)
+            -(soft_pseudo_label * torch.log_softmax(t_logits_us, dim=-1)).sum(
+                dim=-1
+            )
             * mask
         )
         weight_u = hp.lambda_u * min(1.0, (gs + 1) / hp.uda_steps)
@@ -263,11 +270,15 @@ def main():
         s_loss_l_new = F.cross_entropy(s_logits_l.detach(), targets_l)
         dot_product = s_loss_l_new - s_loss_l_old
         _, hard_pseudo_label = torch.max(t_logits_us.detach(), dim=-1)
-        t_loss_mpl = dot_product * F.cross_entropy(t_logits_us, hard_pseudo_label)
+        t_loss_mpl = dot_product * F.cross_entropy(
+            t_logits_us, hard_pseudo_label
+        )
         t_loss = t_loss_uda + t_loss_mpl
         accelerator.backward(t_loss)
         if hp.grad_clip > 0 and accelerator.sync_gradients:
-            accelerator.clip_grad_norm_(teacher_model.parameters(), hp.grad_clip)
+            accelerator.clip_grad_norm_(
+                teacher_model.parameters(), hp.grad_clip
+            )
         t_optim.step()
         t_scheduler.step()
 
@@ -297,7 +308,7 @@ def main():
         metric_s_loss_l_new.update(s_loss_l_new_mean)
         metric_s_loss_l_old.update(s_loss_l_old_mean)
 
-        msg = {"t_loss": metric_s_loss.mean, "s_loss": metric_s_loss.mean}
+        msg = {"t_loss": metric_t_loss.mean, "s_loss": metric_s_loss.mean}
 
         if gs % 50 == 0 or (gs + 1 == hp.total_steps):
             log_dict = {
@@ -317,20 +328,22 @@ def main():
         if gs % 1000 == 0 or (gs + 1 == hp.total_steps):
             test_model = ema_student_model if hp.use_ema else student_model
             test_model.eval()
-            info_dict = eval_loop(hp, test_dl, test_model, accelerator=accelerator)
+            info_dict = eval_loop(
+                hp, test_dl, test_model, accelerator=accelerator
+            )
             test_model.train()
-            accelerator.log(log_dict, step=gs)
+            accelerator.log(info_dict, step=gs)
 
             ckpt = {
                 "teacher_state_dict": teacher_model.state_dict(),
                 "student_state_dict": student_model.state_dict(),
-                "acc": info_dict["acc"],
+                "acc": info_dict["eval/acc"],
                 "gs": gs,
             }
             file_path = "./ckpt/ckpt.pth"
             accelerator.save(ckpt, file_path)
             if accelerator.is_local_main_process:
-                if checkpoint_manager.is_best(info_dict["acc"]):
+                if checkpoint_manager.is_best(info_dict["eval/acc"]):
                     shutil.copyfile(file_path, "./ckpt/best_model.pth.tar")
             accelerator.wait_for_everyone()
 
@@ -339,8 +352,12 @@ def main():
 
     accelerator.wait_for_everyone()
     # finetune loop
-    ft_total_step = hp.finetune_epochs * len(finetune_ds) // hp.finetune_batch_size
-    pbar = tqdm(range(ft_total_step), disable=not accelerator.is_local_main_process)
+    ft_total_step = (
+        hp.finetune_epochs * len(finetune_ds) // hp.finetune_batch_size
+    )
+    pbar = tqdm(
+        range(ft_total_step), disable=not accelerator.is_local_main_process
+    )
     model = student_model
     metric_ft_loss = MeanMetric()
     f_optim = optim.SGD(
@@ -369,20 +386,25 @@ def main():
         pbar.set_postfix(**logs)
 
         if ft_gs % 50 == 0 and (ft_gs + 1 == ft_total_step):
-            accelerator.log({"ft/loss": metric_ft_loss.reset_and_compute()}, ft_gs)
+            accelerator.log(
+                {"ft/loss": metric_ft_loss.reset_and_compute()}, ft_gs
+            )
 
         if ft_gs % (len(finetune_ds) // hp.finetune_batch_size) == 0 and (
             ft_gs + 1 == ft_total_step
         ):
             test_model = ema_student_model if hp.use_ema else student_model
             test_model.eval()
-            info_dict = eval_loop(hp, test_dl, test_model, accelerator=accelerator)
+            info_dict = eval_loop(
+                hp, test_dl, test_model, accelerator=accelerator
+            )
             test_model.train()
+            accelerator.wait_for_everyone()
             accelerator.log(log_dict, step=ft_gs)
     ckpt = {
         "teacher_state_dict": teacher_model.state_dict(),
         "student_state_dict": student_model.state_dict(),
-        "acc": info_dict["acc"],
+        "acc": info_dict["eval/acc"],
         "gs": gs,
     }
     file_path = "./ckpt/end.pth"
@@ -415,9 +437,9 @@ def eval_loop(hp: Hparams, test_dl, model, accelerator: Accelerator):
         acc_meter.append(acc)
         acc_t3_meter.append(acc_t3)
     return {
-        "loss": np.mean(loss_meter),
-        "acc": np.mean(acc_meter),
-        "acc_t3": np.mean(acc_t3_meter),
+        "eval/loss": np.mean(loss_meter),
+        "eval/acc": np.mean(acc_meter),
+        "eval/acc_t3": np.mean(acc_t3_meter),
     }
 
 
