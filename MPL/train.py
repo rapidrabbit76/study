@@ -34,15 +34,11 @@ def main():
     os.makedirs(logging_dir, exist_ok=True)
     kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
-        log_with="tensorboard",
-        logging_dir=logging_dir,
-        kwargs_handlers=[kwargs],
+        log_with="tensorboard", logging_dir=logging_dir, kwargs_handlers=[kwargs]
     )
 
     with accelerator.main_process_first():
-        labeled_ds, unlabeled_ds, test_ds, finetune_ds = DATASET_GETTERS[
-            hp.dataset
-        ](hp)
+        labeled_ds, unlabeled_ds, test_ds, finetune_ds = DATASET_GETTERS[hp.dataset](hp)
 
     accelerator.print(
         f"""
@@ -234,9 +230,7 @@ def main():
         mask = max_probs.ge(hp.threshold).float()
         # UDA loss (KLD)
         t_loss_u = torch.mean(
-            -(soft_pseudo_label * torch.log_softmax(t_logits_us, dim=-1)).sum(
-                dim=-1
-            )
+            -(soft_pseudo_label * torch.log_softmax(t_logits_us, dim=-1)).sum(dim=-1)
             * mask
         )
         weight_u = hp.lambda_u * min(1.0, (gs + 1) / hp.uda_steps)
@@ -270,15 +264,11 @@ def main():
         s_loss_l_new = F.cross_entropy(s_logits_l.detach(), targets_l)
         dot_product = s_loss_l_new - s_loss_l_old
         _, hard_pseudo_label = torch.max(t_logits_us.detach(), dim=-1)
-        t_loss_mpl = dot_product * F.cross_entropy(
-            t_logits_us, hard_pseudo_label
-        )
+        t_loss_mpl = dot_product * F.cross_entropy(t_logits_us, hard_pseudo_label)
         t_loss = t_loss_uda + t_loss_mpl
         accelerator.backward(t_loss)
         if hp.grad_clip > 0 and accelerator.sync_gradients:
-            accelerator.clip_grad_norm_(
-                teacher_model.parameters(), hp.grad_clip
-            )
+            accelerator.clip_grad_norm_(teacher_model.parameters(), hp.grad_clip)
         t_optim.step()
         t_scheduler.step()
 
@@ -312,7 +302,7 @@ def main():
 
         if gs % 50 == 0 or (gs + 1 == hp.total_steps):
             log_dict = {
-                "train/t_loss": metric_s_loss.reset_and_compute(),
+                "train/t_loss": metric_t_loss.reset_and_compute(),
                 "train/t_loss_mpl": metric_t_loss_mpl.reset_and_compute(),
                 "train/t_loss_uda": metric_t_loss_uda.reset_and_compute(),
                 "train/t_loss_l": metric_t_loss_l.reset_and_compute(),
@@ -328,9 +318,7 @@ def main():
         if gs % 1000 == 0 or (gs + 1 == hp.total_steps):
             test_model = ema_student_model if hp.use_ema else student_model
             test_model.eval()
-            info_dict = eval_loop(
-                hp, test_dl, test_model, accelerator=accelerator
-            )
+            info_dict = eval_loop(hp, test_dl, test_model, accelerator=accelerator)
             test_model.train()
             accelerator.log(info_dict, step=gs)
 
@@ -352,12 +340,8 @@ def main():
 
     accelerator.wait_for_everyone()
     # finetune loop
-    ft_total_step = (
-        hp.finetune_epochs * len(finetune_ds) // hp.finetune_batch_size
-    )
-    pbar = tqdm(
-        range(ft_total_step), disable=not accelerator.is_local_main_process
-    )
+    ft_total_step = hp.finetune_epochs * len(finetune_ds) // hp.finetune_batch_size
+    pbar = tqdm(range(ft_total_step), disable=not accelerator.is_local_main_process)
     model = student_model
     metric_ft_loss = MeanMetric()
     f_optim = optim.SGD(
@@ -386,18 +370,14 @@ def main():
         pbar.set_postfix(**logs)
 
         if ft_gs % 50 == 0 and (ft_gs + 1 == ft_total_step):
-            accelerator.log(
-                {"ft/loss": metric_ft_loss.reset_and_compute()}, ft_gs
-            )
+            accelerator.log({"ft/loss": metric_ft_loss.reset_and_compute()}, ft_gs)
 
         if ft_gs % (len(finetune_ds) // hp.finetune_batch_size) == 0 and (
             ft_gs + 1 == ft_total_step
         ):
             test_model = ema_student_model if hp.use_ema else student_model
             test_model.eval()
-            info_dict = eval_loop(
-                hp, test_dl, test_model, accelerator=accelerator
-            )
+            info_dict = eval_loop(hp, test_dl, test_model, accelerator=accelerator)
             test_model.train()
             accelerator.wait_for_everyone()
             accelerator.log(log_dict, step=ft_gs)
